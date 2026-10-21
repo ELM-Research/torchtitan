@@ -176,7 +176,7 @@ class SigLEP(Module):
         keys. The contrastive pooling head and text tower are unused by Orah;
         its projector keeps its initialized weights.
         """
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         prefix = "vision_encoder.vision_model."
         replacements = {
             "embeddings.": "",

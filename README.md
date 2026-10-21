@@ -62,6 +62,26 @@ Token IDs: (2, 128) -> (256,)
 Logits: (256, 1024)
 ```
 
+```
+(torchtitan) bash-4.4$ python -m torchtitan.experiments.orah.example --siglip2-checkpoint /p01/whan/ecg_encoder/src/runs/pretrain/siglip2-base-patch16-naflex/2/checkpoints/epoch_best.pt
+Loaded ECG encoder from /p01/whan/ecg_encoder/src/runs/pretrain/siglip2-base-patch16-naflex/2/checkpoints/epoch_best.pt
+Autotune Choices Stats:
+{"num_choices": 6, "num_triton_choices": 6, "best_kernel": "triton_flex_attention_4", "best_kernel_desc":"BLOCKS_ARE_CONTIGUOUS=False, BLOCK_M=64, BLOCK_N=128, FLOAT32_PRECISION=\"'ieee'\", GQA_SHARED_HEADS=1, HAS_FULL_BLOCKS=True, IS_DIVISIBLE=False, OUTPUT_LOGSUMEXP=False, OUTPUT_MAX=False, PRESCALE_QK=False, QK_HEAD_DIM=64, QK_HEAD_DIM_ROUNDED=64, ROWS_GUARANTEED_SAFE=False, SAFE_HEAD_DIM=True, SM_SCALE=0.125, SPARSE_KV_BLOCK_SIZE=128, SPARSE_Q_BLOCK_SIZE=128, USE_TMA=False, V_HEAD_DIM=64, V_HEAD_DIM_ROUNDED=64, WRITE_DQ=True, num_stages=3, num_warps=4", "best_time": 0.013439999893307686, "best_triton_pos": 0}
+AUTOTUNE flex_attention(1x12x200x64, 1x12x200x64, 1x12x200x64, 1x12x200, 1x12x200, 1x1x2, 1x1x2x2, 1x1x2,1x1x2x2, 200)
+strides: [768, 64, 768, 1], [768, 64, 768, 1], [768, 64, 768, 1], [2400, 200, 1], [2400, 200, 1], [s99, s99, 1], [s22*s72, s22*s72, s72, 1], [s94, s94, 1], [s28*s4, s28*s4, s4, 1], [1]
+dtypes: torch.bfloat16, torch.bfloat16, torch.bfloat16, torch.float32, torch.float32, torch.int32, torch.int32, torch.int32, torch.int32, torch.int32
+  triton_flex_attention_4 0.0134 ms 100.0% BLOCKS_ARE_CONTIGUOUS=False, BLOCK_M=64, BLOCK_N=128, FLOAT32_PRECISION="'ieee'", GQA_SHARED_HEADS=1, HAS_FULL_BLOCKS=True, IS_DIVISIBLE=False, OUTPUT_LOGSUMEXP=False, OUTPUT_MAX=False, PRESCALE_QK=False, QK_HEAD_DIM=64, QK_HEAD_DIM_ROUNDED=64, ROWS_GUARANTEED_SAFE=False, SAFE_HEAD_DIM=True, SM_SCALE=0.125, SPARSE_KV_BLOCK_SIZE=128, SPARSE_Q_BLOCK_SIZE=128, USE_TMA=False, V_HEAD_DIM=64, V_HEAD_DIM_ROUNDED=64, WRITE_DQ=True, num_stages=3, num_warps=4
+  triton_flex_attention_5 0.0136 ms 98.6% BLOCKS_ARE_CONTIGUOUS=False, BLOCK_M=64, BLOCK_N=64, FLOAT32_PRECISION="'ieee'", GQA_SHARED_HEADS=1, HAS_FULL_BLOCKS=True, IS_DIVISIBLE=False, OUTPUT_LOGSUMEXP=False, OUTPUT_MAX=False, PRESCALE_QK=False, QK_HEAD_DIM=64, QK_HEAD_DIM_ROUNDED=64, ROWS_GUARANTEED_SAFE=False, SAFE_HEAD_DIM=True, SM_SCALE=0.125, SPARSE_KV_BLOCK_SIZE=128, SPARSE_Q_BLOCK_SIZE=128, USE_TMA=False, V_HEAD_DIM=64, V_HEAD_DIM_ROUNDED=64, WRITE_DQ=True, num_stages=3, num_warps=4
+  triton_flex_attention_2 0.0177 ms 75.9% BLOCKS_ARE_CONTIGUOUS=False, BLOCK_M=128, BLOCK_N=128, FLOAT32_PRECISION="'ieee'", GQA_SHARED_HEADS=1, HAS_FULL_BLOCKS=True, IS_DIVISIBLE=False, OUTPUT_LOGSUMEXP=False, OUTPUT_MAX=False, PRESCALE_QK=False, QK_HEAD_DIM=64, QK_HEAD_DIM_ROUNDED=64, ROWS_GUARANTEED_SAFE=False, SAFE_HEAD_DIM=True, SM_SCALE=0.125, SPARSE_KV_BLOCK_SIZE=128, SPARSE_Q_BLOCK_SIZE=128, USE_TMA=False, V_HEAD_DIM=64, V_HEAD_DIM_ROUNDED=64, WRITE_DQ=True, num_stages=2, num_warps=8
+  triton_flex_attention_0 0.0198 ms 68.0% BLOCKS_ARE_CONTIGUOUS=False, BLOCK_M=128, BLOCK_N=64, FLOAT32_PRECISION="'ieee'", GQA_SHARED_HEADS=1, HAS_FULL_BLOCKS=True, IS_DIVISIBLE=False, OUTPUT_LOGSUMEXP=False, OUTPUT_MAX=False, PRESCALE_QK=False, QK_HEAD_DIM=64, QK_HEAD_DIM_ROUNDED=64, ROWS_GUARANTEED_SAFE=False, SAFE_HEAD_DIM=True, SM_SCALE=0.125, SPARSE_KV_BLOCK_SIZE=128, SPARSE_Q_BLOCK_SIZE=128, USE_TMA=False, V_HEAD_DIM=64, V_HEAD_DIM_ROUNDED=64, WRITE_DQ=True, num_stages=3, num_warps=4
+  triton_flex_attention_3 0.0212 ms 63.4% BLOCKS_ARE_CONTIGUOUS=False, BLOCK_M=128, BLOCK_N=128, FLOAT32_PRECISION="'ieee'", GQA_SHARED_HEADS=1, HAS_FULL_BLOCKS=True, IS_DIVISIBLE=False, OUTPUT_LOGSUMEXP=False, OUTPUT_MAX=False, PRESCALE_QK=False, QK_HEAD_DIM=64, QK_HEAD_DIM_ROUNDED=64, ROWS_GUARANTEED_SAFE=False, SAFE_HEAD_DIM=True, SM_SCALE=0.125, SPARSE_KV_BLOCK_SIZE=128, SPARSE_Q_BLOCK_SIZE=128, USE_TMA=False, V_HEAD_DIM=64, V_HEAD_DIM_ROUNDED=64, WRITE_DQ=True, num_stages=1, num_warps=8
+  triton_flex_attention_1 0.0243 ms 55.3% BLOCKS_ARE_CONTIGUOUS=False, BLOCK_M=128, BLOCK_N=128, FLOAT32_PRECISION="'ieee'", GQA_SHARED_HEADS=1, HAS_FULL_BLOCKS=True, IS_DIVISIBLE=False, OUTPUT_LOGSUMEXP=False, OUTPUT_MAX=False, PRESCALE_QK=False, QK_HEAD_DIM=64, QK_HEAD_DIM_ROUNDED=64, ROWS_GUARANTEED_SAFE=False, SAFE_HEAD_DIM=True, SM_SCALE=0.125, SPARSE_KV_BLOCK_SIZE=128, SPARSE_Q_BLOCK_SIZE=128, USE_TMA=False, V_HEAD_DIM=64, V_HEAD_DIM_ROUNDED=64, WRITE_DQ=True, num_stages=3, num_warps=4
+SingleProcess AUTOTUNE benchmarking takes 0.2825 seconds and 2.6147 seconds precompiling for 6 choices
+ECGs: (2, 12, 2500)
+Token IDs: (2, 128) -> (256,)
+Logits: (256, 1024)
+```
+
 `torchtitan` is a clean-room, PyTorch-native implementation of large-scale
 training. One readable codebase takes a model from pretraining through
 supervised fine-tuning to reinforcement learning, composing FSDP, tensor,
