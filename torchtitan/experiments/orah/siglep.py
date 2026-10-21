@@ -169,6 +169,50 @@ class SigLEP(Module):
         )
         self.post_layernorm = norm.build()
 
+    def load_siglip2_checkpoint(self, checkpoint_path: str) -> None:
+        """Load a saved ECG SigLIP2 tower after initialization, before sharding.
+
+        Expects the wrapper's model_state_dict with vision_encoder.vision_model
+        keys. The contrastive pooling head and text tower are unused by Orah;
+        its projector keeps its initialized weights.
+        """
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        prefix = "vision_encoder.vision_model."
+        replacements = {
+            "embeddings.": "",
+            "encoder.layers.": "layers.",
+            ".layer_norm1.": ".norm1.",
+            ".layer_norm2.": ".norm2.",
+            ".self_attn.q_proj.": ".attn.wq.",
+            ".self_attn.k_proj.": ".attn.wk.",
+            ".self_attn.v_proj.": ".attn.wv.",
+            ".self_attn.out_proj.": ".attn.proj.",
+            ".mlp.fc1.": ".mlp.linear_fc1.",
+            ".mlp.fc2.": ".mlp.linear_fc2.",
+        }
+        converted = {}
+        for key, value in checkpoint["model_state_dict"].items():
+            if not key.startswith(prefix):
+                continue
+            key = key.removeprefix(prefix)
+            if key.startswith("head."):
+                continue
+            for source, target in replacements.items():
+                key = key.replace(source, target)
+            converted[key] = value
+
+        state = self.state_dict()
+        expected = {key for key in state if not key.startswith("projector.")}
+        missing = expected - converted.keys()
+        unexpected = converted.keys() - expected
+        if missing or unexpected:
+            raise ValueError(
+                "SigLIP2 ECG tower does not match SigLEP: "
+                f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+            )
+        state.update(converted)
+        self.load_state_dict(state, strict=True)
+
     def forward(self, ecg_values: torch.Tensor) -> torch.Tensor:
         config = self.config
         if ecg_values.ndim != 3 or tuple(ecg_values.shape[1:]) != (

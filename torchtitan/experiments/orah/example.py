@@ -4,13 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Run a small, randomly initialized Orah on one CUDA GPU.
+"""Run Orah's debug decoder on one CUDA GPU, optionally with a pretrained ECG tower.
 
 From the repository root: python -m torchtitan.experiments.orah.example
+Add --siglip2-checkpoint /path/to/best.pt for an ECG-adapted
+google/siglip2-base-patch16-naflex checkpoint trained with patch_size=25.
 """
 
 # Shape suffixes: B = batch, C = ECG leads, L = ECG samples,
 # S = text sequence length, T = flattened text tokens, V = vocabulary.
+
+import argparse
+from dataclasses import replace
 
 import torch
 
@@ -19,6 +24,12 @@ from torchtitan.experiments.orah import build_model_config, SigLEP
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--siglip2-checkpoint",
+        help="ECG SigLIP2 base NaFlex .pt checkpoint containing model_state_dict",
+    )
+    args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit(
             "This example requires CUDA for Qwen3.5's Gated DeltaNet kernels."
@@ -38,6 +49,14 @@ def main():
         patch_size=25,
         num_ecg_tokens=100,
     )
+    if args.siglip2_checkpoint is not None:
+        encoder = replace(
+            encoder,
+            hidden_size=768,
+            intermediate_size=3072,
+            num_hidden_layers=12,
+            num_attention_heads=12,
+        )
     config = build_model_config(
         "debugmodel",
         encoder=encoder,
@@ -49,6 +68,9 @@ def main():
     )
     model = config.build().to(device=device, dtype=torch.bfloat16)
     model.init_states(buffer_device=device)
+    if args.siglip2_checkpoint is not None:
+        model.vision_encoder.load_siglip2_checkpoint(args.siglip2_checkpoint)
+        print(f"Loaded ECG encoder from {args.siglip2_checkpoint}")
     model.eval()
 
     ecg_BCL = torch.randn(batch_size, 12, 2500, device=device)
