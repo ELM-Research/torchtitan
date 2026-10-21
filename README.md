@@ -19,6 +19,18 @@
 
 </div>
 
+## MY INSTALLATION NOTES
+We use cuda 13.2
+
+1. uv venv
+2. source .venv/bin/activate
+3. pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu132 # important to get nightly
+4. pip install -r requirements.txt
+5. pip install ninja psutil
+6. git clone https://github.com/Dao-AILab/flash-attention.git and cd into hopper
+7. python setup.py install
+8. NGPU=1 ./run_train.sh   # Llama 3 debug model, 10 step should work
+
 `torchtitan` is a clean-room, PyTorch-native implementation of large-scale
 training. One readable codebase takes a model from pretraining through
 supervised fine-tuning to reinforcement learning, composing FSDP, tensor,
