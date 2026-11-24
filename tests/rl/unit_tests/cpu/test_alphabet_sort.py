@@ -27,7 +27,7 @@ from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
 
@@ -415,8 +415,8 @@ def test_rollouter_builds_one_env_per_group_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_names(monkeypatch)
-    config = _alphabet_sort_rollouter_config()
-    rollouter = config.build()
+    config = _alphabet_sort_rollouter_config(max_rollout_tokens=2048)
+    rollouter = config.build(max_rollouts_in_flight=24)
     worker = config.worker.build()
     asyncio.run(
         worker.setup_async(
@@ -431,8 +431,8 @@ def test_rollouter_builds_one_env_per_group_member(
 
 
 def test_rollouter_config_wires_alphabet_sort() -> None:
-    config = _alphabet_sort_rollouter_config()
-    assert isinstance(config.training_dataloader, IterableRLDataLoader.Config)
+    config = _alphabet_sort_rollouter_config(max_rollout_tokens=2048)
+    assert isinstance(config.training_dataloader, IterableRolloutDataLoader.Config)
     assert isinstance(config.training_dataloader.dataset, AlphabetSortDataset.Config)
     assert isinstance(config.validation_dataset, AlphabetSortDataset.Config)
     assert isinstance(config.worker.message_env, AlphabetSortEnv.Config)

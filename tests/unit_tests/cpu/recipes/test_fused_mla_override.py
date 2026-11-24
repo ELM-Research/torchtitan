@@ -27,7 +27,7 @@ from torchtitan.models.common.attention.cp_mla import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import ComplexRoPE, YaRNScalingConfig
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 from torchtitan_recipes.overrides.fused_mla import (
@@ -67,7 +67,7 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
             ),
         )
 
-    def test_rejects_cp_backends_for_either_transform_order(self):
+    def test_supports_cp_backends_for_either_transform_order(self):
         for backend in (AllGatherKVMLAFlexAttention, UlyssesMLAAttention):
             for override_first in (False, True):
                 with self.subTest(
@@ -84,11 +84,13 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
                     if not override_first:
                         config = fused_mla(config)
 
-                    with self.assertRaisesRegex(
-                        ValueError,
-                        "does not support context parallelism.*Remove the fused_mla override",
-                    ):
-                        config.build()
+                    attention = config.build()
+                    self.assertIsInstance(attention, FusedMLAAttention)
+                    self.assertIsInstance(attention.inner_attention, backend)
+                    self.assertEqual(
+                        list(attention.state_dict()),
+                        list(self._attention_config().build().state_dict()),
+                    )
 
     def test_non_cp_backend_still_builds(self):
         config = fused_mla(self._attention_config())
@@ -199,11 +201,9 @@ class TestFusedMLANumerics(unittest.TestCase):
         self.rope = ComplexRoPE.Config(
             dim=self.rope_dim,
             max_context_length=128,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(
+                factor=40.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=4096
+            ),
         ).build()
         self.rope = self.rope.to(cuda)
         self.positions = torch.arange(self.num_tokens, device=cuda)

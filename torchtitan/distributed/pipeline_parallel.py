@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
@@ -28,7 +29,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -42,9 +43,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "get_module_fqns_per_model_part",
-    "prepare_pipeline_schedule_for_cuda_graph",
+    "prepare_pipeline_schedule_for_accelerator_graph",
     "pipeline_llm",
     "pipeline_with_first_last_stage_modules",
+    "split_module",
 ]
 
 
@@ -77,6 +79,7 @@ def pipeline_llm(
     *,
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
+    precision: PrecisionConfig,
     parallelism: ParallelismConfig,
     local_compile: LocalCompileConfig,
     activation_remat: ActivationRematConfig | None,
@@ -120,6 +123,7 @@ def pipeline_llm(
             parallelism_context=parallelism_context,
             parallelism=parallelism,
             training=training,
+            precision=precision,
             model_config=model_config,
             lm_head_in_loss=isinstance(loss_fn, ChunkedLossWrapper),
         )
@@ -142,7 +146,7 @@ def pipeline_llm(
         # apply SPMD-style PT-D techniques
         m = m.parallelize(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
             local_compile=local_compile,
             activation_remat=activation_remat,
@@ -372,7 +376,7 @@ def _get_pipeline_metadata(
     return num_virtual_stages, num_layers, input_weight, output_weight
 
 
-def prepare_pipeline_schedule_for_cuda_graph(
+def prepare_pipeline_schedule_for_accelerator_graph(
     schedule: _PipelineSchedule,
     *,
     args: tuple[Any, ...],
@@ -381,7 +385,7 @@ def prepare_pipeline_schedule_for_cuda_graph(
     loss_kwargs: dict[str, Any],
     for_eval: bool = False,
 ) -> None:
-    """Prepare training or eval pipeline metadata outside CUDA graph capture."""
+    """Prepare training or eval pipeline metadata outside accelerator graph capture."""
     # TODO: Use a public pipeline schedule initialization API.
     if isinstance(schedule, PipelineScheduleSingle):
         stages = [schedule._stage]
@@ -513,6 +517,16 @@ def _build_pipeline_schedule(
         )
         schedule._load_csv(pp_schedule_csv)
 
+    # Chunked partial backwards preserve deferred-reduction policies during
+    # metadata inference, leaving unsharded gradients outside param.grad.
+    # TODO: Move this reset into PipelineStage's metadata cleanup.
+    # https://github.com/pytorch/pytorch/issues/203178
+    for stage in stages:
+        if isinstance(stage.submod, FSDPModule):
+            schedule.register_post_metadata_inference_cleanup(
+                stage.submod.reset_iter_state
+            )
+
     return schedule
 
 
@@ -629,7 +643,7 @@ def _generate_llm_fqn_per_model_part(
     return module_names_per_stage
 
 
-def _split_module(
+def split_module(
     whole_model: BaseModel,
     module_names: list[str],
 ) -> BaseModel:
@@ -766,6 +780,7 @@ def _build_decoder_stage_io(
     parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
     training: TrainingConfig,
+    precision: PrecisionConfig,
     model_config: Decoder.Config,
     lm_head_in_loss: bool,
 ) -> _DecoderStageIO:
@@ -789,7 +804,7 @@ def _build_decoder_stage_io(
                 f"be divisible by TP ({parallelism_context.tp}) with sequence parallelism."
             )
 
-    dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
+    dtype = TORCH_DTYPE_MAP[precision.param_dtype]
 
     def example(*shape: int, dtype: torch.dtype = dtype) -> torch.Tensor:
         return torch.empty(shape, dtype=dtype, device="meta")
@@ -889,7 +904,7 @@ def _pipeline_module_split(
     )
     for stage_idx in pp_rank_to_stage_indices:
         module_names = module_names_per_stage[stage_idx]
-        model_chunk = _split_module(whole_model, module_names)
+        model_chunk = split_module(whole_model, module_names)
         stage = PipelineStage(
             model_chunk,
             stage_idx,

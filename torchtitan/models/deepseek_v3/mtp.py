@@ -7,15 +7,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
@@ -24,7 +25,8 @@ from torchtitan.distributed.spmd_types import (
     spmd_dense_sp_enabled,
     spmd_mesh_group,
 )
-from torchtitan.models.base.module import ModuleList
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
@@ -32,7 +34,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
@@ -158,16 +160,24 @@ class MTPTransformerBlock(TransformerBlock):
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
-        h = h + self.attention(self.attention_norm(h), attention_metadata, positions)
+        # attention_norm and the residual add read the eh_proj output with bare ops.
+        remat.recompute_needs_tensor(h)
+        attn_out = self.attention(self.attention_norm(h), attention_metadata, positions)
+        # The residual add reads the attention output with a bare op.
+        remat.recompute_needs_tensor(attn_out)
+        h = h + attn_out
         if isinstance(self.feed_forward, MoE):
-            h = h + self.feed_forward(
+            ffn_out = self.feed_forward(
                 self.ffn_norm(h),
                 padding_mask_T=mtp_padding_mask_T,
                 aux_loss_denominator=aux_loss_denominator,
             )
         else:
-            h = h + self.feed_forward(self.ffn_norm(h))
-        return self.mtp_norm(h)
+            ffn_out = self.feed_forward(self.ffn_norm(h))
+        # The residual add reads the feed-forward output with a bare op.
+        remat.recompute_needs_tensor(ffn_out)
+        h = h + ffn_out
+        return maybe_gather_tp_input(self.mtp_norm, self.mtp_norm(h))
 
     def _maybe_shard_mtp_valid_mask_across_tp(
         self, mtp_input_valid_mask_T: torch.Tensor
@@ -199,7 +209,29 @@ class MTPDecoder(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        mtp_layers: list = field(default_factory=list)
+        mtp_layers: list[MTPTransformerBlock.Config] = field(default_factory=list)
+
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            decoder_estimate = super(MTPDecoder.Config, self).build_flops_estimator(
+                model, seq_len=seq_len, excluded_submodules=excluded_submodules
+            )
+            model = cast(MTPDecoder, model)
+            repeated_head_flops_per_token = (
+                6
+                * len(self.mtp_layers)
+                * sum(param.numel() for param in model.lm_head.parameters())
+            )
+            return lambda input_dict: (
+                decoder_estimate(input_dict)
+                + repeated_head_flops_per_token
+                * int((~input_dict["padding_mask"]).sum())
+            )
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -216,11 +248,17 @@ class MTPDecoder(Decoder):
                 )
             self.mtp_layers.append(layer_config.build())
 
+    def _remat_block_container_fqns(self) -> list[str]:
+        return [
+            *super()._remat_block_container_fqns(),
+            *([] if self.mtp_layers is None else ["mtp_layers"]),
+        ]
+
     def _apply_fsdp(
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -233,16 +271,17 @@ class MTPDecoder(Decoder):
         apply_fsdp_to_mtp_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
         )
 
     def preprocess_inputs(
@@ -252,7 +291,6 @@ class MTPDecoder(Decoder):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -308,7 +346,6 @@ class MTPDecoder(Decoder):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 
@@ -404,7 +441,7 @@ class MTPDecoder(Decoder):
             )
 
         prev_depth_hidden = h
-        h = self.norm(h) if self.norm is not None else h
+        h = self._pre_lm_head_norm_and_gather(h)
 
         mtp_outputs = []
         for depth, (layer, depth_tokens, mtp_input_valid_mask) in enumerate(
@@ -463,7 +500,16 @@ def apply_fsdp_to_mtp_decoder(
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    *,
+    unshard_in_current_stream: bool = False,
 ) -> None:
+    if unshard_in_current_stream and model.mtp_layers is not None:
+        # tok_embeddings runs once per MTP depth, which the explicit
+        # prefetching chain in apply_fsdp_to_decoder does not model.
+        raise ValueError(
+            "parallelism.fsdp_unshard_in_current_stream is not supported for models "
+            "with MTP layers."
+        )
     mtp_layer_keys = []
     try:
         if model.mtp_layers is not None:
@@ -486,6 +532,7 @@ def apply_fsdp_to_mtp_decoder(
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=symm_mem_scope,
+            unshard_in_current_stream=unshard_in_current_stream,
         )
     finally:
         for key in mtp_layer_keys:

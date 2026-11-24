@@ -35,6 +35,10 @@ ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+torchtitan = ["py.typed"]
+torchtitan_recipes = ["py.typed"]
+
 [tool.setuptools.packages.find]
 where = [""]
 # torchtitan_recipes is a second top-level package, listed so that
@@ -54,6 +58,7 @@ project-excludes = ["torchtitan/experiments", "torchtitan/rl", "**/tests/**"]
 replace-imports-with-any = [
     "torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "batch_invariant_ops", "verifiers.*", # optional dependencies
     "dist_moe", "dist_moe.*", # optional dependency without Pyrefly stubs
+    "mlflow", "mlflow.*", # optional dependency
     # torch_remat is required, but does not publish Pyrefly stubs.
     "torch_remat",
 ]

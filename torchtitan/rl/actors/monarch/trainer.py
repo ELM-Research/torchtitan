@@ -11,8 +11,14 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from monarch.actor import Actor, concurrent_endpoint
+from monarch.actor import concurrent_endpoint
 
+from torchtitan.rl.actors.monarch.actor import Actor
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    TensorShard,
+    TrainerSource,
+)
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
 
@@ -25,6 +31,17 @@ class _TrainerActorEndpoints:
         await super().initialize_torchstore_client()
 
     @concurrent_endpoint
+    async def register_model_state_dict_source(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        generator_rank_layouts: list[dict[str, TensorShard]],
+    ) -> TrainerSource:
+        return super().register_model_state_dict_source(
+            config, generator_rank_layouts=generator_rank_layouts
+        )
+
+    @concurrent_endpoint
     async def get_policy_version(self) -> int:
         return super().policy_version
 
@@ -33,8 +50,8 @@ class _TrainerActorEndpoints:
         return self.dp_rank
 
     @concurrent_endpoint
-    async def get_controller_state(self) -> dict[str, Any] | None:
-        return await super().get_controller_state()
+    async def get_resume_state(self) -> dict[str, Any] | None:
+        return await super().get_resume_state()
 
     @concurrent_endpoint
     async def close(self) -> None:
@@ -61,11 +78,9 @@ class _TrainerActorEndpoints:
 
     @concurrent_endpoint
     async def optim_step(
-        self, *, controller_state: dict[str, Any], last_step: bool = False
+        self, *, resume_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
-        return await super().optim_step(
-            controller_state=controller_state, last_step=last_step
-        )
+        return await super().optim_step(resume_state=resume_state, last_step=last_step)
 
     @concurrent_endpoint
     async def push_model_state_dict(self) -> None:
