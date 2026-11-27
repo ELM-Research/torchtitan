@@ -21,6 +21,7 @@ import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.orah import build_model_config, SigLEP
+from torchtitan.tools.utils import set_default_dtype
 
 
 def main():
@@ -66,7 +67,9 @@ def main():
         vocab_size=vocab_size,
         attn_backend="flex",
     )
-    model = config.build().to(device=device, dtype=torch.bfloat16)
+    with torch.device("meta"), set_default_dtype(torch.bfloat16):
+        model = config.build()
+    model.to_empty(device=device)
     model.init_states(buffer_device=device)
     if args.siglip2_checkpoint is not None:
         model.vision_encoder.load_siglip2_checkpoint(args.siglip2_checkpoint)

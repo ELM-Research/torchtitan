@@ -19,15 +19,16 @@ import torch.nn.functional as F
 from spmd_types import SpmdType
 from torch import nn
 
-from torchtitan.distributed.spmd_types import spmd_mesh_size
+from torchtitan.distributed.spmd_types import disable_dense_sp, spmd_mesh_size
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common import Embedding, Linear
+from torchtitan.models.common import ColumnParallelLinear, Linear, RowParallelLinear
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
-    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -42,20 +43,16 @@ from torchtitan.models.common.vision_encoder_sharding import (
 )
 
 
-class ECGPositionEmbedding(Embedding):
+class ECGPositionEmbedding(nn.Embedding, Module):
     """Learned ECG positions stay whole on each TP rank, unlike vocab embeddings."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Embedding.Config):
-        pass
+    class Config(Module.Config):
+        num_embeddings: int
+        embedding_dim: int
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return nn.Embedding.forward(self, input)
-
-
-def _no_rope(q_THQ, k_THQ, rope_cache):
-    # SigLEP uses learned positions; keep the shared block's rotary hook inert.
-    return q_THQ, k_THQ
+    def __init__(self, config: Config):
+        super().__init__(config.num_embeddings, config.embedding_dim)
 
 
 class SigLEP(Module):
@@ -135,16 +132,13 @@ class SigLEP(Module):
             eps=config.layer_norm_eps,
             sharding_config=invariant_norm_sharding_config(),
         )
-        attention_sharding = vision_attention_sharding_config(rope_cache_dp=spmd.R)
-        # Learned positions need no rotary cache or cache redistribution.
-        attention_sharding.in_src_shardings.pop("rope_cache")
-        attention_sharding.in_dst_shardings.pop("rope_cache")
         block = VisionTransformerBlock.Config(
             norm1=norm,
             norm2=norm,
             attn=VisionAttention.Config(
                 dim=dim,
                 num_heads=config.num_attention_heads,
+                rope=None,
                 wq=_colwise(dim, dim, input_tp=spmd.R),
                 wk=_colwise(dim, dim, input_tp=spmd.R),
                 wv=_colwise(dim, dim, input_tp=spmd.R),
@@ -152,7 +146,7 @@ class SigLEP(Module):
                 inner_attention=FlexInnerAttention.Config(
                     sharding_config=vision_inner_attention_sharding_config()
                 ),
-                sharding_config=attention_sharding,
+                sharding_config=vision_attention_sharding_config(positions_dp=spmd.R),
             ),
             mlp=VisionMLP.Config(
                 fc1=_colwise(dim, config.intermediate_size),
@@ -248,12 +242,10 @@ class SigLEP(Module):
                 batch * num_patches,
                 x_TD.device,
             )
-        empty_cache_0 = x_TD.new_empty(0)
         for layer in self.layers.values():
             x_TD = layer(
                 x_TD,
-                rope_cache=empty_cache_0,
-                rope_apply=_no_rope,
+                positions=positions_P,
                 attention_mask=attention_mask,
             )
         x_BPD = self.post_layernorm(x_TD).view(batch, num_patches, -1)
@@ -269,6 +261,27 @@ class ProjectedSigLEP(SigLEP):
     class Config(SigLEP.Config):
         output_size: int
 
+        def build_flops_estimator(self, encoder: "ProjectedSigLEP") -> FlopsEstimator:
+            num_patches = self.segment_length // self.patch_size
+            patch_flops = active_parameter_flops_per_token(
+                encoder, excluded_submodules=(encoder.projector,)
+            )
+            attention_flops = (
+                12 * self.hidden_size * self.num_hidden_layers * num_patches**2
+            )
+            projector_flops = active_parameter_flops_per_token(encoder.projector)
+            flops_per_ecg = (
+                num_patches * patch_flops
+                + attention_flops
+                + self.num_ecg_tokens * projector_flops
+            )
+
+            def estimate(input_dict) -> int:
+                ecgs = input_dict.get("ecg_values")
+                return 0 if ecgs is None else ecgs.shape[0] * flops_per_ecg
+
+            return estimate
+
     def __init__(self, config: Config):
         super().__init__(config)
         self.projector = VisionMLP.Config(
@@ -277,13 +290,15 @@ class ProjectedSigLEP(SigLEP):
             act_fn=GELU.Config(approximate="none"),
         ).build()
 
+    @disable_dense_sp()
     def forward(self, ecg_values: torch.Tensor) -> torch.Tensor:
         features_BND = super().forward(ecg_values)
         return self.projector(features_BND.flatten(0, 1))
 
 
 def _colwise(dim, output_dim, *, input_tp=spmd.I):
-    return Linear.Config(
+    linear_cls = Linear if input_tp == spmd.R else ColumnParallelLinear
+    return linear_cls.Config(
         in_features=dim,
         out_features=output_dim,
         bias=True,
@@ -292,7 +307,7 @@ def _colwise(dim, output_dim, *, input_tp=spmd.I):
 
 
 def _rowwise(dim, output_dim):
-    return InvariantRowParallelLinear.Config(
+    return RowParallelLinear.Config(
         in_features=dim,
         out_features=output_dim,
         bias=True,
@@ -310,8 +325,4 @@ def projected_encoder_config(
             if f.name != "sharding_config"
         },
         output_size=output_size,
-        sharding_config=ShardingConfig(
-            out_src_shardings=SpmdType({"dp": spmd.V, "cp": spmd.I, "tp": spmd.I}),
-            out_dst_shardings=SpmdType({"dp": spmd.V, "cp": spmd.R, "tp": spmd.R}),
-        ),
     )
