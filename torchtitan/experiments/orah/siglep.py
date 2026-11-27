@@ -43,6 +43,21 @@ from torchtitan.models.common.vision_encoder_sharding import (
 )
 
 
+SIGLEP_HF_KEY_REPLACEMENTS = {
+    "embeddings.patch_embedding.": "patch_embedding.",
+    "embeddings.position_embedding.": "position_embedding.",
+    "encoder.layers.": "layers.",
+    ".layer_norm1.": ".norm1.",
+    ".layer_norm2.": ".norm2.",
+    ".self_attn.q_proj.": ".attn.wq.",
+    ".self_attn.k_proj.": ".attn.wk.",
+    ".self_attn.v_proj.": ".attn.wv.",
+    ".self_attn.out_proj.": ".attn.proj.",
+    ".mlp.fc1.": ".mlp.linear_fc1.",
+    ".mlp.fc2.": ".mlp.linear_fc2.",
+}
+
+
 class ECGPositionEmbedding(nn.Embedding, Module):
     """Learned ECG positions stay whole on each TP rank, unlike vocab embeddings."""
 
@@ -172,18 +187,6 @@ class SigLEP(Module):
         """
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         prefix = "vision_encoder.vision_model."
-        replacements = {
-            "embeddings.": "",
-            "encoder.layers.": "layers.",
-            ".layer_norm1.": ".norm1.",
-            ".layer_norm2.": ".norm2.",
-            ".self_attn.q_proj.": ".attn.wq.",
-            ".self_attn.k_proj.": ".attn.wk.",
-            ".self_attn.v_proj.": ".attn.wv.",
-            ".self_attn.out_proj.": ".attn.proj.",
-            ".mlp.fc1.": ".mlp.linear_fc1.",
-            ".mlp.fc2.": ".mlp.linear_fc2.",
-        }
         converted = {}
         for key, value in checkpoint["model_state_dict"].items():
             if not key.startswith(prefix):
@@ -191,7 +194,7 @@ class SigLEP(Module):
             key = key.removeprefix(prefix)
             if key.startswith("head."):
                 continue
-            for source, target in replacements.items():
+            for source, target in SIGLEP_HF_KEY_REPLACEMENTS.items():
                 key = key.replace(source, target)
             converted[key] = value
 
