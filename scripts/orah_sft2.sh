@@ -6,6 +6,8 @@
 # LICENSE file in the root directory of this source tree.
 
 export ORAH_STAGE=2
-export ORAH_CHECKPOINT="${1:?Pass the SFT stage 1 checkpoint directory}"
-shift
+if [[ $# -gt 0 && "$1" != -* ]]; then
+    export ORAH_CHECKPOINT="$1"
+    shift
+fi
 NGPU="${NGPU:-6}" MODULE=torchtitan_recipes.sft.orah CONFIG=orah_sft bash run_train.sh "$@"

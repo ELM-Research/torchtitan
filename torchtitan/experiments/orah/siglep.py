@@ -15,9 +15,14 @@ from functools import partial
 
 import spmd_types as spmd
 import torch
+import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
 from spmd_types import SpmdType
 from torch import nn
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+    StateDictOptions,
+)
 
 from torchtitan.distributed.spmd_types import disable_dense_sp, spmd_mesh_size
 from torchtitan.models.base.model import FlopsEstimator
@@ -43,7 +48,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
 )
 
 
-SIGLEP_HF_KEY_REPLACEMENTS = {
+_SIGLIP2_KEY_REPLACEMENTS = {
     "embeddings.patch_embedding.": "patch_embedding.",
     "embeddings.position_embedding.": "position_embedding.",
     "encoder.layers.": "layers.",
@@ -178,8 +183,23 @@ class SigLEP(Module):
         )
         self.post_layernorm = norm.build()
 
+    def load_siglip2_base(self, checkpoint_dir: str) -> None:
+        """Load the public vision transformer weights into an ECG tower."""
+        state = {
+            key: value
+            for key, value in self.state_dict().items()
+            if key.startswith(("layers.", "post_layernorm."))
+        }
+        hf_state = {}
+        for key, value in state.items():
+            for hf_name, native_name in reversed(_SIGLIP2_KEY_REPLACEMENTS.items()):
+                key = key.replace(native_name, hf_name)
+            hf_state[f"vision_model.{key}"] = value
+        dcp.load(hf_state, storage_reader=dcp.HuggingFaceStorageReader(checkpoint_dir))
+        self.load_state_dict(state, strict=False)
+
     def load_siglip2_checkpoint(self, checkpoint_path: str) -> None:
-        """Load a saved ECG SigLIP2 tower after initialization, before sharding.
+        """Load a saved ECG SigLIP2 tower, including its ECG embeddings.
 
         Expects the wrapper's model_state_dict with vision_encoder.vision_model
         keys. The contrastive pooling head and text tower are unused by Orah;
@@ -194,12 +214,13 @@ class SigLEP(Module):
             key = key.removeprefix(prefix)
             if key.startswith("head."):
                 continue
-            for source, target in SIGLEP_HF_KEY_REPLACEMENTS.items():
+            for source, target in _SIGLIP2_KEY_REPLACEMENTS.items():
                 key = key.replace(source, target)
             converted[key] = value
 
-        state = self.state_dict()
-        expected = {key for key in state if not key.startswith("projector.")}
+        expected = {
+            key for key in self.state_dict() if not key.startswith("projector.")
+        }
         missing = expected - converted.keys()
         unexpected = converted.keys() - expected
         if missing or unexpected:
@@ -207,8 +228,11 @@ class SigLEP(Module):
                 "SigLIP2 ECG tower does not match SigLEP: "
                 f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
             )
-        state.update(converted)
-        self.load_state_dict(state, strict=True)
+        set_model_state_dict(
+            self,
+            converted,
+            options=StateDictOptions(full_state_dict=True, strict=False),
+        )
 
     def forward(self, ecg_values: torch.Tensor) -> torch.Tensor:
         config = self.config

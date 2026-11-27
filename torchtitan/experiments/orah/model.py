@@ -26,7 +26,6 @@ from torchtitan.models.qwen3_5 import build_model_config as build_qwen35_config
 from torchtitan.models.qwen3_5.model import Qwen35Model, Qwen35MultimodalModel
 
 from .siglep import projected_encoder_config, ProjectedSigLEP, SigLEP
-from .state_dict_adapter import OrahStateDictAdapter
 
 
 class OrahModel(Qwen35MultimodalModel):
@@ -36,7 +35,7 @@ class OrahModel(Qwen35MultimodalModel):
     Each ECG replaces num_ecg_tokens placeholders, in ECG batch order.
     """
 
-    state_dict_adapter_cls = OrahStateDictAdapter
+    state_dict_adapter_cls = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Qwen35MultimodalModel.Config):

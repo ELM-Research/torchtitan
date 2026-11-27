@@ -13,7 +13,6 @@ import grain.python as grain
 import torch
 from huggingface_hub import snapshot_download
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -30,6 +29,7 @@ from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout, Owned
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.experiments.orah import build_model_config, SigLEP
+from torchtitan.experiments.orah.checkpointer import OrahCheckpointer
 from torchtitan.experiments.orah.sft_data import (
     ECG_TOKEN,
     OrahSFTCollator,
@@ -52,8 +52,9 @@ def _orah_sft(stage: int | None) -> Trainer.Config:
             "Orah SFT uses DistMuon with FSDP and requires at least two GPUs"
         )
 
+    qwen_model = f"Qwen/Qwen3.5-{model_size}-Base"
     tokenizer_path = os.environ.get("ORAH_TOKENIZER") or snapshot_download(
-        f"Qwen/Qwen3.5-{model_size}-Base",
+        qwen_model,
         allow_patterns=[
             "tokenizer.json",
             "tokenizer_config.json",
@@ -138,17 +139,16 @@ def _orah_sft(stage: int | None) -> Trainer.Config:
             ),
             adamw,
         ]
-        checkpoint = Path(os.environ["ORAH_CHECKPOINT"]).resolve(strict=True)
-        from_hf = not (checkpoint / ".metadata").is_file()
-        if from_hf and not any(checkpoint.glob("*.safetensors")):
-            raise ValueError(
-                f"Expected an ELM safetensors or TorchTitan DCP checkpoint: {checkpoint}"
-            )
+        initial_checkpoint = os.environ.get("ORAH_CHECKPOINT") or None
+        if initial_checkpoint is not None:
+            initial_checkpoint = str(Path(initial_checkpoint).resolve())
         steps_per_epoch = len(sft_rows(stage)) // (batch_size * world_size)
         steps = 3 * steps_per_epoch
-        checkpointer = CheckpointManager.Config(
-            initial_load_path=str(checkpoint),
-            initial_load_in_hf=from_hf,
+        checkpointer = OrahCheckpointer.Config(
+            qwen_model=qwen_model,
+            siglep_checkpoint=os.environ.get("ORAH_SIGLEP_CHECKPOINT") or None,
+            initial_load_path=initial_checkpoint,
+            initial_load_model_only=initial_checkpoint is not None,
             interval=steps_per_epoch,
             last_save_model_only=False,
         )
