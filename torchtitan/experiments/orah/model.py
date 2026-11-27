@@ -132,7 +132,7 @@ class OrahModel(Qwen35MultimodalModel):
 
 
 def build_model_config(
-    flavor: str = "9B",
+    flavor: str = "4B",
     *,
     encoder: SigLEP.Config,
     ecg_token_id: int,
