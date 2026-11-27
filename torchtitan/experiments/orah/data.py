@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -22,6 +23,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
 ECG_TOKEN = "<ecg>"
+END_OF_TEXT = "<|endoftext|>"
 _SYSTEM_PROMPT = """You are an expert cardiac electrophysiologist. You interpret 12-lead ECG signals and answer any questions about them.
 
 Deliver responses that are precise and grounded in electrophysiology and clinical reasoning.
@@ -51,34 +53,19 @@ class OrahTokenizer(HuggingFaceTokenizer):
         self.tokenizer.add_tokens([ECG_TOKEN])
 
 
-@cache
-def sft_rows(stage: int | None) -> Dataset:
-    if stage is not None:
-        return load_dataset(f"ELM-Research/orah-sft-{stage}", split="train")
-    return Dataset.from_list(
-        [
-            {
-                "ecg_path": None,
-                "text": [
-                    {"role": "user", "content": "Can you see the ECG?"},
-                    {"role": "assistant", "content": "Yes."},
-                    {"role": "user", "content": "Interpret this ECG."},
-                    {
-                        "role": "assistant",
-                        "content": "<ecg>\n<think>\nSynthetic signal.\n</think>\n\n<answer>Debug example</answer>",
-                    },
-                ],
-            }
-        ]
-    )
-
-
 @dataclass(frozen=True, kw_only=True, slots=True)
-class OrahSFTDataset:
+class OrahDataset(ABC):
     stage: int | None
     batch_size: int
     ecg_root: str
     num_ecg_tokens: int
+
+    @staticmethod
+    @abstractmethod
+    def rows(stage: int | None) -> Dataset: ...
+
+    @abstractmethod
+    def text_processor(self, context: DatasetBuildContext): ...
 
     def build(
         self,
@@ -86,7 +73,63 @@ class OrahSFTDataset:
         context: DatasetBuildContext,
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.MapDataset:
-        rows = sft_rows(self.stage)
+        rows = self.rows(self.stage)
+        prepare_text = self.text_processor(context)
+        ecg_root = Path(self.ecg_root)
+
+        def prepare(index):
+            row = rows[index]
+            text = prepare_text(row["text"])
+            if row["ecg_path"] is None:
+                ecg = np.random.default_rng(0).standard_normal(
+                    (12, 2500), dtype=np.float32
+                )
+            else:
+                signal = np.load(
+                    ecg_root / row["ecg_path"].lstrip("/"), allow_pickle=True
+                )
+                ecg = np.asarray(signal.item()["ecg"], dtype=np.float32)
+            return text, ecg
+
+        policy = dataset_iteration_policy
+        global_batch_size = self.batch_size * policy.dp_world_size
+        num_rows = len(rows) // global_batch_size * global_batch_size
+        if num_rows == 0:
+            raise ValueError("Orah needs at least one global batch")
+        dataset = grain.MapDataset.range(len(rows))
+        if policy.shuffle:
+            dataset = dataset.shuffle(seed=policy.seed)
+        # Give all DP ranks the same number of full microbatches in each epoch.
+        dataset = dataset[policy.dp_rank : num_rows : policy.dp_world_size]
+        if policy.repeat:
+            dataset = dataset.repeat()
+        return dataset.map(prepare)
+
+
+class OrahSFTDataset(OrahDataset):
+    @staticmethod
+    @cache
+    def rows(stage: int | None) -> Dataset:
+        if stage is not None:
+            return load_dataset(f"ELM-Research/orah-sft-{stage}", split="train")
+        return Dataset.from_list(
+            [
+                {
+                    "ecg_path": None,
+                    "text": [
+                        {"role": "user", "content": "Can you see the ECG?"},
+                        {"role": "assistant", "content": "Yes."},
+                        {"role": "user", "content": "Interpret this ECG."},
+                        {
+                            "role": "assistant",
+                            "content": "<ecg>\n<think>\nSynthetic signal.\n</think>\n\n<answer>Debug example</answer>",
+                        },
+                    ],
+                }
+            ]
+        )
+
+    def text_processor(self, context: DatasetBuildContext):
         tokenizer = context.tokenizer
         assert isinstance(tokenizer, OrahTokenizer)
         im_end = tokenizer.token_to_id("<|im_end|>")
@@ -94,12 +137,10 @@ class OrahSFTDataset:
             raise ValueError("Orah SFT requires a Qwen3.5 tokenizer")
         placeholders = ECG_TOKEN * self.num_ecg_tokens + "\n"
         limit = context.max_context_length
-        ecg_root = Path(self.ecg_root)
 
-        def prepare(index):
-            row = rows[index]
+        def prepare(messages_from_row):
             messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
-            for message in row["text"]:
+            for message in messages_from_row:
                 content = _MODALITY_TAG.sub("", message["content"])
                 content = _IMAGE_WORD.sub(
                     lambda match: "Signal" if match[0][0].isupper() else "signal",
@@ -134,46 +175,65 @@ class OrahSFTDataset:
             if len(encoding.ids) > limit and response_mask[-1]:
                 tokens[-1] = im_end
             labels = np.where(response_mask, tokens, IGNORE_INDEX)
-            text = TextSequence(
+            return TextSequence(
                 input_ids=tokens[:-1],
                 labels=labels[1:],
             )
-            if row["ecg_path"] is None:
-                ecg = np.random.default_rng(0).standard_normal(
-                    (12, 2500), dtype=np.float32
-                )
-            else:
-                signal = np.load(
-                    ecg_root / row["ecg_path"].lstrip("/"), allow_pickle=True
-                )
-                ecg = np.asarray(signal.item()["ecg"], dtype=np.float32)
-            return text, ecg
 
-        policy = dataset_iteration_policy
-        global_batch_size = self.batch_size * policy.dp_world_size
-        num_rows = len(rows) // global_batch_size * global_batch_size
-        if num_rows == 0:
-            raise ValueError(
-                "Orah SFT needs at least one global batch of conversations"
+        return prepare
+
+
+class OrahPretrainDataset(OrahDataset):
+    @staticmethod
+    @cache
+    def rows(stage: int | None) -> Dataset:
+        if stage is not None:
+            return load_dataset(f"ELM-Research/orah-pretraining-{stage}", split="train")
+        return Dataset.from_list(
+            [{"ecg_path": None, "text": "<ecg>\nsynthetic ECG report"}]
+        )
+
+    def text_processor(self, context: DatasetBuildContext):
+        tokenizer = context.tokenizer
+        assert isinstance(tokenizer, OrahTokenizer)
+        separator = tokenizer.token_to_id(END_OF_TEXT)
+        if separator is None:
+            raise ValueError("Orah pretraining requires Qwen's <|endoftext|> token")
+        prefix = tokenizer.encode(
+            ECG_TOKEN * self.num_ecg_tokens + "\n", add_bos=False, add_eos=False
+        )
+        max_report_length = context.max_context_length - len(prefix) - 1
+        if max_report_length < 1:
+            raise ValueError("Orah pretraining context has no room for the report")
+
+        def prepare(text):
+            report = tokenizer.encode(
+                text.removeprefix(f"{ECG_TOKEN}\n"),
+                add_bos=False,
+                add_eos=False,
+            )[:max_report_length]
+            # Supervise the separator but mask the ECG prefix and its newline.
+            return TextSequence(
+                input_ids=np.asarray(prefix + report, dtype=np.int64),
+                labels=np.asarray(
+                    [IGNORE_INDEX] * (len(prefix) - 1) + report + [separator],
+                    dtype=np.int64,
+                ),
             )
-        dataset = grain.MapDataset.range(len(rows))
-        if policy.shuffle:
-            dataset = dataset.shuffle(seed=policy.seed)
-        # Give all DP ranks the same number of full microbatches in each epoch.
-        dataset = dataset[policy.dp_rank : num_rows : policy.dp_world_size]
-        if policy.repeat:
-            dataset = dataset.repeat()
-        return dataset.map(prepare)
+
+        return prepare
 
 
-class OrahSFTCollator(TextCollator):
+class OrahCollator(TextCollator):
     @dataclass(kw_only=True, slots=True)
     class Config(TextCollator.Config):
         batch_size: int
+        pad_token_id: int = 0
 
     def __init__(self, config: Config, *, context: DatasetBuildContext):
         super().__init__(config, context=context)
         self.batch_size = config.batch_size
+        self.pad_token_id = config.pad_token_id
 
     def num_rows_per_microbatch(self):
         return self.batch_size
@@ -181,5 +241,7 @@ class OrahSFTCollator(TextCollator):
     def __call__(self, rows):
         texts, ecgs = zip(*rows, strict=True)
         microbatch = super().__call__(texts)
+        if self.pad_token_id:
+            microbatch.input.masked_fill_(microbatch.padding_mask, self.pad_token_id)
         microbatch.model_kwargs["ecg_values"] = torch.from_numpy(np.stack(ecgs))
         return microbatch

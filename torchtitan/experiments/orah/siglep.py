@@ -183,18 +183,20 @@ class SigLEP(Module):
         )
         self.post_layernorm = norm.build()
 
-    def load_siglip2_base(self, checkpoint_dir: str) -> None:
-        """Load the public vision transformer weights into an ECG tower."""
+    def load_siglip2_hf(self, checkpoint_dir: str, *, ecg_embeddings: bool) -> None:
+        """Load an HF vision tower, including ECG embeddings for SigLEP."""
         state = {
             key: value
             for key, value in self.state_dict().items()
-            if key.startswith(("layers.", "post_layernorm."))
+            if not key.startswith("projector.")
+            and (ecg_embeddings or key.startswith(("layers.", "post_layernorm.")))
         }
+        prefix = "model." if ecg_embeddings else "vision_model."
         hf_state = {}
         for key, value in state.items():
             for hf_name, native_name in reversed(_SIGLIP2_KEY_REPLACEMENTS.items()):
                 key = key.replace(native_name, hf_name)
-            hf_state[f"vision_model.{key}"] = value
+            hf_state[f"{prefix}{key}"] = value
         dcp.load(hf_state, storage_reader=dcp.HuggingFaceStorageReader(checkpoint_dir))
         self.load_state_dict(state, strict=False)
 

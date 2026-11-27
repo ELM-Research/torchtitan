@@ -6,6 +6,7 @@
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -86,8 +87,13 @@ class OrahCheckpointer(CheckpointManager):
             vision_path = snapshot_download(
                 _SIGLIP2_BASE, allow_patterns="model.safetensors"
             )
-            part.vision_encoder.load_siglip2_base(vision_path)
+            part.vision_encoder.load_siglip2_hf(vision_path, ecg_embeddings=False)
             logger.info("Loaded SigLIP2 vision weights from %s", _SIGLIP2_BASE)
+        elif Path(self.siglep_checkpoint).is_dir():
+            part.vision_encoder.load_siglip2_hf(
+                self.siglep_checkpoint, ecg_embeddings=True
+            )
+            logger.info("Loaded SigLEP weights from %s", self.siglep_checkpoint)
         else:
             part.vision_encoder.load_siglip2_checkpoint(self.siglep_checkpoint)
             logger.info("Loaded SigLEP weights from %s", self.siglep_checkpoint)
