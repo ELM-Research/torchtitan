@@ -43,6 +43,26 @@ _ASSISTANT_RESPONSE = re.compile(
 )
 
 
+def load_ecg(path: Path) -> np.ndarray:
+    signal = np.load(path, allow_pickle=True)
+    return np.asarray(signal.item()["ecg"], dtype=np.float32)
+
+
+def prepare_sft_messages(messages_from_row, *, num_ecg_tokens: int) -> list[dict]:
+    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    for message in messages_from_row:
+        content = _MODALITY_TAG.sub("", message["content"])
+        content = _IMAGE_WORD.sub(
+            lambda match: "Signal" if match[0][0].isupper() else "signal", content
+        )
+        messages.append(
+            {"role": message["role"], "content": _ROLE_PREFIX.sub("", content)}
+        )
+    user = next(message for message in messages if message["role"] == "user")
+    user["content"] = ECG_TOKEN * num_ecg_tokens + "\n" + user["content"]
+    return messages
+
+
 class OrahTokenizer(HuggingFaceTokenizer):
     @dataclass(kw_only=True, slots=True)
     class Config(HuggingFaceTokenizer.Config):
@@ -85,10 +105,7 @@ class OrahDataset(ABC):
                     (12, 2500), dtype=np.float32
                 )
             else:
-                signal = np.load(
-                    ecg_root / row["ecg_path"].lstrip("/"), allow_pickle=True
-                )
-                ecg = np.asarray(signal.item()["ecg"], dtype=np.float32)
+                ecg = load_ecg(ecg_root / row["ecg_path"].lstrip("/"))
             return text, ecg
 
         policy = dataset_iteration_policy
@@ -137,22 +154,12 @@ class OrahSFTDataset(OrahDataset):
         im_end = tokenizer.token_to_id("<|im_end|>")
         if im_end is None:
             raise ValueError("Orah SFT requires a Qwen3.5 tokenizer")
-        placeholders = ECG_TOKEN * self.num_ecg_tokens + "\n"
         limit = context.max_context_length
 
         def prepare(messages_from_row):
-            messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
-            for message in messages_from_row:
-                content = _MODALITY_TAG.sub("", message["content"])
-                content = _IMAGE_WORD.sub(
-                    lambda match: "Signal" if match[0][0].isupper() else "signal",
-                    content,
-                )
-                messages.append(
-                    {"role": message["role"], "content": _ROLE_PREFIX.sub("", content)}
-                )
-            user = next(message for message in messages if message["role"] == "user")
-            user["content"] = placeholders + user["content"]
+            messages = prepare_sft_messages(
+                messages_from_row, num_ecg_tokens=self.num_ecg_tokens
+            )
             last_user = max(
                 index
                 for index, message in enumerate(messages)
