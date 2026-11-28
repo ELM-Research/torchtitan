@@ -9,6 +9,7 @@ set -euo pipefail
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 export NGPU="${NGPU:-8}"
+export WANDB_PROJECT="${WANDB_PROJECT:-torchtitan-orah}"
 siglep_checkpoint="${ORAH_SIGLEP_CHECKPOINT:-/p01/whan/ecg_encoder/src/runs/pretrain/siglip2-base-patch16-naflex/2/checkpoints/epoch_best.pt}"
 unset ORAH_BENCHMARK_STEPS ORAH_PIPELINE_DEBUG ORAH_CHECKPOINT ORAH_SIGLEP_CHECKPOINT
 mkdir -p outputs/orah_train

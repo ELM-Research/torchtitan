@@ -38,6 +38,7 @@ from torchtitan.experiments.orah.data import (
     OrahPretrainDataset,
     OrahTokenizer,
 )
+from torchtitan.observability.metrics import MetricsProcessor, WandBLogger
 from torchtitan.trainer import Trainer
 
 
@@ -226,6 +227,11 @@ def orah_training(
             ),
             steps=steps,
             disable_accelerator_graphs=True,
+        ),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config()]
+            if not debug and benchmark_steps is None
+            else []
         ),
         activation_remat=None if debug else FullActivationRematConfig(),
         loss=CrossEntropyLoss.Config()
