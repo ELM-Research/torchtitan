@@ -82,6 +82,7 @@ class OrahCheckpointer(CheckpointManager):
                 f"Qwen checkpoint is missing Orah language weights: {sorted(missing)}"
             )
         model.load_state_dict(pretrained)
+        logger.info("Loaded Qwen language weights from %s", self.qwen_model)
 
         if self.siglep_checkpoint is None:
             vision_path = snapshot_download(

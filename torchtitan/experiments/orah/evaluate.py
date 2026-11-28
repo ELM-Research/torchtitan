@@ -109,6 +109,7 @@ def _load_model(checkpoint, *, flavor, tokenizer, device, max_new_tokens):
     state = model.state_dict()
     dcp.load(state, checkpoint_id=checkpoint)
     model.load_state_dict(state)
+    print(f"Loaded Orah checkpoint from {checkpoint}", flush=True)
     model._skip_lm_head = True
     return model.eval()
 
