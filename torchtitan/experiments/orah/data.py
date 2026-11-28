@@ -6,7 +6,7 @@
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from pathlib import Path
 
@@ -15,11 +15,12 @@ import numpy as np
 import torch
 from datasets import Dataset, load_dataset
 
-from torchtitan.components.data.collators import TextCollator
+from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import TextSequence
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.tools.utils import round_up
 
 
 ECG_TOKEN = "<ecg>"
@@ -230,24 +231,34 @@ class OrahPretrainDataset(OrahDataset):
         return prepare
 
 
-class OrahCollator(TextCollator):
+class OrahCollator(Collator):
     @dataclass(kw_only=True, slots=True)
-    class Config(TextCollator.Config):
+    class Config(Collator.Config):
         batch_size: int
+        pad_to_multiple_of: int
         pad_token_id: int = 0
 
     def __init__(self, config: Config, *, context: DatasetBuildContext):
-        super().__init__(config, context=context)
-        self.batch_size = config.batch_size
-        self.pad_token_id = config.pad_token_id
+        self.config = config
+        self.context = context
 
     def num_rows_per_microbatch(self):
-        return self.batch_size
+        return self.config.batch_size
 
     def __call__(self, rows):
         texts, ecgs = zip(*rows, strict=True)
-        microbatch = super().__call__(texts)
-        if self.pad_token_id:
-            microbatch.input.masked_fill_(microbatch.padding_mask, self.pad_token_id)
+        num_tokens = sum(len(text.input_ids) for text in texts)
+        padded_length = round_up(num_tokens, self.config.pad_to_multiple_of)
+        if padded_length > self.context.num_tokens_per_microbatch:
+            raise ValueError("Orah microbatch exceeds the configured token budget")
+        text_collator = TextCollator(
+            TextCollator.Config(),
+            context=replace(self.context, num_tokens_per_microbatch=padded_length),
+        )
+        microbatch = text_collator(texts)
+        if self.config.pad_token_id:
+            microbatch.input.masked_fill_(
+                microbatch.padding_mask, self.config.pad_token_id
+            )
         microbatch.model_kwargs["ecg_values"] = torch.from_numpy(np.stack(ecgs))
         return microbatch

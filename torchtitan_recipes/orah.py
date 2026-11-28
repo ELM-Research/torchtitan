@@ -97,6 +97,7 @@ def orah_training(
             raise ValueError("ORAH_PIPELINE_DEBUG requires ORAH_BENCHMARK_STEPS")
 
     num_tokens_per_microbatch = batch_size * seq_len
+    num_loss_chunks = batch_size * 2
     num_rows_per_train_step_per_dp_rank = batch_size * gradient_accumulation_steps
 
     qwen_model = f"Qwen/Qwen3.5-{model_size}-Base"
@@ -229,7 +230,7 @@ def orah_training(
         activation_remat=None if debug else FullActivationRematConfig(),
         loss=CrossEntropyLoss.Config()
         if debug
-        else ChunkedLossWrapper.Config(num_chunks=batch_size * 2),
+        else ChunkedLossWrapper.Config(num_chunks=num_loss_chunks),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(optimizers=optimizers),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -245,7 +246,9 @@ def orah_training(
                 num_ecg_tokens=encoder.num_ecg_tokens,
             ),
             collator=OrahCollator.Config(
-                batch_size=batch_size, pad_token_id=pad_token_id
+                batch_size=batch_size,
+                pad_to_multiple_of=1 if debug else num_loss_chunks,
+                pad_token_id=pad_token_id,
             ),
             max_num_documents=batch_size,
             seed=0,
