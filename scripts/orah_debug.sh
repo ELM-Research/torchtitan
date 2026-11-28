@@ -5,4 +5,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-NGPU=1 MODULE=torchtitan_recipes.sft.orah CONFIG=orah_sft_debug bash run_train.sh "$@"
+set -euo pipefail
+
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+export NGPU="${NGPU:-8}" ORAH_BENCHMARK_STEPS="${ORAH_BENCHMARK_STEPS:-30}" ORAH_PIPELINE_DEBUG=1
+siglep_checkpoint="${ORAH_SIGLEP_CHECKPOINT:-/p01/whan/ecg_encoder/src/runs/pretrain/siglip2-base-patch16-naflex/2/checkpoints/epoch_best.pt}"
+unset ORAH_CHECKPOINT ORAH_SIGLEP_CHECKPOINT
+mkdir -p outputs/orah_pipeline_debug
+run_dir=$(mktemp -d outputs/orah_pipeline_debug/run.XXXXXXXX)
+printf 'Running %s steps per stage. Saving outputs under %s\n' "$ORAH_BENCHMARK_STEPS" "$run_dir"
+
+ORAH_STAGE=1 ORAH_SIGLEP_CHECKPOINT="$siglep_checkpoint" \
+    MODULE=torchtitan_recipes.orah CONFIG=orah_pretrain \
+    bash run_train.sh --output-dir "$run_dir/pretrain1"
+
+checkpoint=$(ls -d "$run_dir/pretrain1"/checkpoint/step-*/.metadata)
+ORAH_STAGE=2 ORAH_CHECKPOINT="${checkpoint%/.metadata}" \
+    MODULE=torchtitan_recipes.orah CONFIG=orah_pretrain \
+    bash run_train.sh --output-dir "$run_dir/pretrain2"
+
+checkpoint=$(ls -d "$run_dir/pretrain2"/checkpoint/step-*/.metadata)
+ORAH_STAGE=1 ORAH_CHECKPOINT="${checkpoint%/.metadata}" \
+    MODULE=torchtitan_recipes.sft.orah CONFIG=orah_sft \
+    bash run_train.sh --output-dir "$run_dir/sft1"
+
+checkpoint=$(ls -d "$run_dir/sft1"/checkpoint/step-*/.metadata)
+ORAH_STAGE=2 ORAH_CHECKPOINT="${checkpoint%/.metadata}" \
+    MODULE=torchtitan_recipes.sft.orah CONFIG=orah_sft \
+    bash run_train.sh --output-dir "$run_dir/sft2"
+
+ls -d "$run_dir/sft2"/checkpoint/step-*/.metadata >/dev/null

@@ -53,6 +53,14 @@ def orah_training(
     siglep_checkpoint: str | None = None,
     pad_token: str | None = None,
 ) -> Trainer.Config:
+    """Build an Orah recipe.
+
+    For real training, ORAH_MICROBATCH_SIZE sets rows per rank per microbatch,
+    ORAH_SEQ_LEN sets the context cap, and ORAH_GRAD_ACCUM_STEPS sets the number
+    of microbatches per optimizer step. ORAH_BENCHMARK_STEPS runs that many
+    optimizer steps on real data. The pipeline debug launcher sets
+    ORAH_PIPELINE_DEBUG=1 to save a final checkpoint for the next stage.
+    """
     debug = stage is None
     model_size = os.environ.get("ORAH_MODEL", "4B")
     if model_size not in ("4B", "9B"):
@@ -63,6 +71,33 @@ def orah_training(
         raise ValueError(
             "Orah training uses DistMuon with FSDP and requires at least two GPUs"
         )
+
+    batch_size = {"debugmodel": 1, "4B": 12, "9B": 10}[flavor]
+    seq_len = 384 if debug else 1024
+    gradient_accumulation_steps = 1
+    benchmark_steps = None
+    pipeline_debug = not debug and os.environ.get("ORAH_PIPELINE_DEBUG") == "1"
+    if not debug:
+        batch_size = int(os.environ.get("ORAH_MICROBATCH_SIZE", batch_size))
+        seq_len = int(os.environ.get("ORAH_SEQ_LEN", seq_len))
+        gradient_accumulation_steps = int(os.environ.get("ORAH_GRAD_ACCUM_STEPS", "1"))
+        if batch_size < 1 or gradient_accumulation_steps < 1:
+            raise ValueError(
+                "ORAH_MICROBATCH_SIZE and ORAH_GRAD_ACCUM_STEPS must be positive"
+            )
+        if seq_len <= 0 or seq_len % 2:
+            raise ValueError("ORAH_SEQ_LEN must be positive and even for chunked loss")
+        if "ORAH_BENCHMARK_STEPS" in os.environ:
+            benchmark_steps = int(os.environ["ORAH_BENCHMARK_STEPS"])
+            if benchmark_steps < 1:
+                raise ValueError("ORAH_BENCHMARK_STEPS must be positive")
+            if not pipeline_debug and benchmark_steps < 10:
+                raise ValueError("ORAH_BENCHMARK_STEPS must be at least 10")
+        elif pipeline_debug:
+            raise ValueError("ORAH_PIPELINE_DEBUG requires ORAH_BENCHMARK_STEPS")
+
+    num_tokens_per_microbatch = batch_size * seq_len
+    num_rows_per_train_step_per_dp_rank = batch_size * gradient_accumulation_steps
 
     qwen_model = f"Qwen/Qwen3.5-{model_size}-Base"
     tokenizer_path = os.environ.get("ORAH_TOKENIZER") or snapshot_download(
@@ -80,8 +115,6 @@ def orah_training(
     pad_token_id = 0 if pad_token is None else tokenizer.token_to_id(pad_token)
     if pad_token_id is None:
         raise ValueError(f"Orah tokenizer is missing {pad_token}")
-    batch_size = {"debugmodel": 1, "4B": 12, "9B": 10}[flavor]
-    seq_len = 384 if debug else 1024
     encoder = SigLEP.Config(
         hidden_size=64 if debug else 768,
         intermediate_size=128 if debug else 3072,
@@ -157,10 +190,12 @@ def orah_training(
                 )
             )
         optimizers.append(adamw)
-        steps_per_epoch = len(dataset.rows(stage)) // (batch_size * world_size)
+        steps_per_epoch = len(dataset.rows(stage)) // (
+            num_rows_per_train_step_per_dp_rank * world_size
+        )
         if steps_per_epoch == 0:
             raise ValueError("Orah needs at least one global batch")
-        steps = epochs * steps_per_epoch
+        steps = benchmark_steps or epochs * steps_per_epoch
         checkpointer = OrahCheckpointer.Config(
             qwen_model=qwen_model,
             siglep_checkpoint=siglep_checkpoint,
@@ -168,10 +203,15 @@ def orah_training(
                 str(Path(initial_checkpoint).resolve()) if initial_checkpoint else None
             ),
             initial_load_model_only=initial_checkpoint is not None,
-            interval=steps_per_epoch,
+            interval=steps if pipeline_debug else steps_per_epoch,
             last_save_model_only=False,
+            load_only=benchmark_steps is not None and not pipeline_debug,
         )
 
+    if pipeline_debug:
+        name = f"{name}_debug"
+    elif benchmark_steps is not None:
+        name = f"{name}_benchmark"
     torch.set_float32_matmul_precision("high")
     return Trainer.Config(
         model=model,
@@ -179,7 +219,10 @@ def orah_training(
         tokenizer=tokenizer_config,
         parallelism=parallelism,
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch,
+            num_tokens_per_train_step=(
+                num_tokens_per_microbatch * world_size * gradient_accumulation_steps
+            ),
             steps=steps,
             disable_accelerator_graphs=True,
         ),
@@ -197,7 +240,7 @@ def orah_training(
         dataloader=GrainDataLoader.Config(
             dataset=dataset(
                 stage=stage,
-                batch_size=batch_size,
+                num_rows_per_train_step_per_dp_rank=num_rows_per_train_step_per_dp_rank,
                 ecg_root=os.environ.get("ORAH_ECG_ROOT", "/"),
                 num_ecg_tokens=encoder.num_ecg_tokens,
             ),

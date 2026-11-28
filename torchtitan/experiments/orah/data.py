@@ -56,7 +56,7 @@ class OrahTokenizer(HuggingFaceTokenizer):
 @dataclass(frozen=True, kw_only=True, slots=True)
 class OrahDataset(ABC):
     stage: int | None
-    batch_size: int
+    num_rows_per_train_step_per_dp_rank: int
     ecg_root: str
     num_ecg_tokens: int
 
@@ -92,14 +92,16 @@ class OrahDataset(ABC):
             return text, ecg
 
         policy = dataset_iteration_policy
-        global_batch_size = self.batch_size * policy.dp_world_size
+        global_batch_size = (
+            self.num_rows_per_train_step_per_dp_rank * policy.dp_world_size
+        )
         num_rows = len(rows) // global_batch_size * global_batch_size
         if num_rows == 0:
             raise ValueError("Orah needs at least one global batch")
         dataset = grain.MapDataset.range(len(rows))
         if policy.shuffle:
             dataset = dataset.shuffle(seed=policy.seed)
-        # Give all DP ranks the same number of full microbatches in each epoch.
+        # Keep every optimizer step within one epoch, including with accumulation.
         dataset = dataset[policy.dp_rank : num_rows : policy.dp_world_size]
         if policy.repeat:
             dataset = dataset.repeat()
