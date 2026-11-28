@@ -210,27 +210,42 @@ def main():
         print(f"Evaluating {benchmark} with seed {seed}", flush=True)
         records = []
         for row in tqdm(dataset, desc=benchmark):
-            *history, reference = prepare_sft_messages(
+            messages = prepare_sft_messages(
                 row["text"], num_ecg_tokens=model.config.vision_encoder.num_ecg_tokens
             )
-            prompt = tokenizer.apply_chat_template(
-                history, add_generation_prompt=True, enable_thinking=True
-            ).removesuffix("<think>\n")
-            prediction = _generate(
-                model,
-                tokenizer=tokenizer,
-                prompt=prompt,
-                ecg_path=ecg_root / row["ecg_path"].lstrip("/"),
-                device=device,
-                max_new_tokens=args.max_new_tokens,
-            )
-            records.append(
-                {
-                    "prompt": prompt,
-                    "ground_truth": reference["content"],
-                    "predicted": prediction,
-                }
-            )
+            ecg_path = ecg_root / row["ecg_path"].lstrip("/")
+            history = []
+            for message in messages:
+                if message["role"] != "assistant":
+                    history.append(message)
+                    continue
+
+                prompt = tokenizer.apply_chat_template(
+                    history, add_generation_prompt=True, enable_thinking=True
+                ).removesuffix("<think>\n")
+                prediction = _generate(
+                    model,
+                    tokenizer=tokenizer,
+                    prompt=prompt,
+                    ecg_path=ecg_path,
+                    device=device,
+                    max_new_tokens=args.max_new_tokens,
+                )
+                records.append(
+                    {
+                        "prompt": prompt,
+                        "ground_truth": message["content"],
+                        "predicted": prediction,
+                    }
+                )
+                # Keep historical reasoning in the prompt as in SFT.
+                history.append(
+                    {
+                        "role": "assistant",
+                        "content": prediction.replace(ECG_TOKEN, ""),
+                        "reasoning_content": "",
+                    }
+                )
 
         run_dir /= f"ELM-Research_{benchmark}"
         run_dir.mkdir(parents=True, exist_ok=True)

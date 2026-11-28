@@ -151,8 +151,7 @@ class OrahSFTDataset(OrahDataset):
     def text_processor(self, context: DatasetBuildContext):
         tokenizer = context.tokenizer
         assert isinstance(tokenizer, OrahTokenizer)
-        im_end = tokenizer.token_to_id("<|im_end|>")
-        if im_end is None:
+        if tokenizer.token_to_id("<|im_end|>") is None:
             raise ValueError("Orah SFT requires a Qwen3.5 tokenizer")
         limit = context.max_context_length
 
@@ -181,8 +180,6 @@ class OrahSFTDataset(OrahDataset):
             for response in _ASSISTANT_RESPONSE.finditer(conversation):
                 start, end = response.span(1)
                 response_mask |= (starts >= start) & (ends <= end)
-            if len(encoding.ids) > limit and response_mask[-1]:
-                tokens[-1] = im_end
             labels = np.where(response_mask, tokens, IGNORE_INDEX)
             return TextSequence(
                 input_ids=tokens[:-1],
