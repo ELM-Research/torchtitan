@@ -47,11 +47,18 @@ class OrahCheckpointer(CheckpointManager):
     class Config(CheckpointManager.Config):
         qwen_model: str
         siglep_checkpoint: str | None = None
+        additional_save_steps: tuple[int, ...] = ()
 
     def __init__(self, config: Config, **kwargs):
         super().__init__(config, **kwargs)
         self.qwen_model = config.qwen_model
         self.siglep_checkpoint = config.siglep_checkpoint
+        self.additional_save_steps = frozenset(config.additional_save_steps)
+
+    def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
+        return super()._should_save(curr_step, last_step) or (
+            not self.load_only and curr_step in self.additional_save_steps
+        )
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:

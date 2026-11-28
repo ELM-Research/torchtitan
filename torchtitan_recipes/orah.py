@@ -58,9 +58,10 @@ def orah_training(
 
     For real training, ORAH_MICROBATCH_SIZE sets rows per rank per microbatch,
     ORAH_SEQ_LEN sets the context cap, and ORAH_GRAD_ACCUM_STEPS sets the number
-    of microbatches per optimizer step. ORAH_BENCHMARK_STEPS runs that many
-    optimizer steps on real data. The pipeline debug launcher sets
-    ORAH_PIPELINE_DEBUG=1 to save a final checkpoint for the next stage.
+    of microbatches per optimizer step. ORAH_NUM_CHECKPOINTS sets the number of
+    saves per stage, including the final step (default: 3). ORAH_BENCHMARK_STEPS
+    runs that many optimizer steps on real data. The pipeline debug launcher
+    sets ORAH_PIPELINE_DEBUG=1 to save a final checkpoint for the next stage.
     """
     debug = stage is None
     model_size = os.environ.get("ORAH_MODEL", "4B")
@@ -77,6 +78,7 @@ def orah_training(
     seq_len = 384 if debug else 1024
     gradient_accumulation_steps = 1
     benchmark_steps = None
+    num_checkpoints = 1
     pipeline_debug = not debug and os.environ.get("ORAH_PIPELINE_DEBUG") == "1"
     if not debug:
         batch_size = int(os.environ.get("ORAH_MICROBATCH_SIZE", batch_size))
@@ -96,6 +98,10 @@ def orah_training(
                 raise ValueError("ORAH_BENCHMARK_STEPS must be at least 10")
         elif pipeline_debug:
             raise ValueError("ORAH_PIPELINE_DEBUG requires ORAH_BENCHMARK_STEPS")
+        else:
+            num_checkpoints = int(os.environ.get("ORAH_NUM_CHECKPOINTS", "3"))
+            if num_checkpoints < 1:
+                raise ValueError("ORAH_NUM_CHECKPOINTS must be positive")
 
     num_tokens_per_microbatch = batch_size * seq_len
     num_loss_chunks = batch_size * 2
@@ -198,6 +204,7 @@ def orah_training(
         if steps_per_epoch == 0:
             raise ValueError("Orah needs at least one global batch")
         steps = benchmark_steps or epochs * steps_per_epoch
+        num_checkpoints = min(num_checkpoints, steps)
         checkpointer = OrahCheckpointer.Config(
             qwen_model=qwen_model,
             siglep_checkpoint=siglep_checkpoint,
@@ -205,10 +212,15 @@ def orah_training(
                 str(Path(initial_checkpoint).resolve()) if initial_checkpoint else None
             ),
             initial_load_model_only=initial_checkpoint is not None,
-            interval=steps if pipeline_debug else steps_per_epoch,
+            interval=steps,
+            additional_save_steps=tuple(
+                steps * checkpoint_index // num_checkpoints
+                for checkpoint_index in range(1, num_checkpoints)
+            ),
             last_save_model_only=False,
             load_only=benchmark_steps is not None and not pipeline_debug,
         )
+        checkpointer.keep_latest_k = max(checkpointer.keep_latest_k, num_checkpoints)
 
     if pipeline_debug:
         name = f"{name}_debug"
